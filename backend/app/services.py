@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
+import os
+import requests
 
 import httpx
 
@@ -34,6 +37,114 @@ async def geocode_query(query: str) -> Tuple[float, float, str]:
     lon = float(first["lon"])
     display = first.get("display_name", query)
     return lat, lon, display
+
+
+# --------------------
+# requests-based helpers (sync) for NASA POWER and FIRMS
+# --------------------
+
+def fetch_power_monthly_requests(lat: float, lon: float, start_year: int, end_year: int) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch monthly data using requests for a year range.
+    Returns mapping YYYYMM -> { 'T2M': value, 'PRECTOTCORR': value, 'RH2M': value }
+    """
+    if start_year > end_year:
+        raise ValueError("start_year must be <= end_year")
+    start = f"{start_year:04d}01"
+    end = f"{end_year:04d}12"
+    params = {
+        "parameters": ",".join(NASA_PARAMS),
+        "community": "AG",
+        "longitude": lon,
+        "latitude": lat,
+        "start": start,
+        "end": end,
+        "format": "JSON",
+    }
+    headers = {"User-Agent": USER_AGENT}
+    resp = requests.get(NASA_POWER_BASE, params=params, headers=headers, timeout=60)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    parameter_root = None
+    if isinstance(payload, dict):
+        if "properties" in payload and isinstance(payload["properties"], dict):
+            props = payload["properties"]
+            parameter_root = props.get("parameter") or props.get("parameters")
+        if parameter_root is None and "parameters" in payload:
+            parameter_root = payload["parameters"]
+    if not parameter_root:
+        raise ValueError("Unexpected NASA POWER response structure")
+
+    t2m = parameter_root.get("T2M", {})
+    prcp = parameter_root.get("PRECTOTCORR", {})
+    rh = parameter_root.get("RH2M", {})
+
+    monthly: Dict[str, Dict[str, Optional[float]]] = {}
+    for k in set(map(str, [*t2m.keys(), *prcp.keys(), *rh.keys()])):
+        monthly[k] = {
+            "T2M": _safe_float(t2m.get(k) if k in t2m else t2m.get(int(k)) if isinstance(next(iter(t2m or {}), None), int) else t2m.get(k)),
+            "PRECTOTCORR": _safe_float(prcp.get(k) if k in prcp else prcp.get(int(k)) if isinstance(next(iter(prcp or {}), None), int) else prcp.get(k)),
+            "RH2M": _safe_float(rh.get(k) if k in rh else rh.get(int(k)) if isinstance(next(iter(rh or {}), None), int) else rh.get(k)),
+        }
+    return monthly
+
+
+def aggregate_yearly_averages(monthly: Dict[str, Dict[str, Optional[float]]]) -> List[Dict]:
+    """Aggregate monthly (YYYYMM) dict to yearly averages of T2M, PRECTOTCORR, RH2M."""
+    sums = defaultdict(lambda: {"T2M": 0.0, "T2M_n": 0, "PRECTOTCORR": 0.0, "PRECTOTCORR_n": 0, "RH2M": 0.0, "RH2M_n": 0})
+    for yyyymm, vals in monthly.items():
+        year = int(str(yyyymm)[:4])
+        if (t := vals.get("T2M")) is not None:
+            sums[year]["T2M"] += t
+            sums[year]["T2M_n"] += 1
+        if (p := vals.get("PRECTOTCORR")) is not None:
+            sums[year]["PRECTOTCORR"] += p
+            sums[year]["PRECTOTCORR_n"] += 1
+        if (h := vals.get("RH2M")) is not None:
+            sums[year]["RH2M"] += h
+            sums[year]["RH2M_n"] += 1
+
+    years = []
+    for year in sorted(sums.keys()):
+        rec = sums[year]
+        years.append(
+            {
+                "year": year,
+                "average_temperature_c": rec["T2M"] / rec["T2M_n"] if rec["T2M_n"] else None,
+                "average_precip_mm": rec["PRECTOTCORR"] / rec["PRECTOTCORR_n"] if rec["PRECTOTCORR_n"] else None,
+                "average_humidity_percent": rec["RH2M"] / rec["RH2M_n"] if rec["RH2M_n"] else None,
+            }
+        )
+    return years
+
+
+def count_firms_recent_fires(lon_min: float, lat_min: float, lon_max: float, lat_max: float, days: int = 30, token: Optional[str] = None) -> Dict:
+    """Count recent fires in bbox over last `days` using NASA FIRMS area API (CSV).
+    Requires an API token in `token` or env FIRMS_API_KEY.
+    """
+    token = token or os.getenv("FIRMS_API_KEY")
+    if not token:
+        raise ValueError("FIRMS_API_KEY is required for FIRMS API")
+
+    base = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+    bbox = f"{lon_min},{lat_min},{lon_max},{lat_max}"
+    headers = {"User-Agent": USER_AGENT}
+    products = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT"]
+    per_source: Dict[str, int] = {}
+    total = 0
+    for product in products:
+        url = f"{base}/{token}/{product}/{days}/{bbox}"
+        r = requests.get(url, headers=headers, timeout=60)
+        if r.status_code == 401:
+            raise PermissionError("Unauthorized to FIRMS API; check FIRMS_API_KEY")
+        r.raise_for_status()
+        text = r.text.strip()
+        # CSV header + rows; count data rows
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        count = max(0, len(lines) - 1) if lines else 0
+        per_source[product] = count
+        total += count
+    return {"days": days, "total": total, "by_source": per_source}
 
 
 def _yyyymm_range(start: dt.date | None, end: dt.date | None) -> Tuple[str, str]:

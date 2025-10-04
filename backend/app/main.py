@@ -6,7 +6,14 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .services import fetch_nasa_power_monthly, geocode_query, compute_business_suitability
+from .services import (
+    fetch_nasa_power_monthly,
+    geocode_query,
+    compute_business_suitability,
+    fetch_power_monthly_requests,
+    aggregate_yearly_averages,
+    count_firms_recent_fires,
+)
 
 app = FastAPI(title="EcoShield API", version="1.0.0")
 
@@ -69,3 +76,37 @@ async def climate_history(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch climate data: {e}")
+
+
+@app.get("/api/climate")
+def climate_yearly(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    start_year: int = Query(..., ge=1981, le=2100),
+    end_year: int = Query(..., ge=1981, le=2100),
+):
+    try:
+        monthly = fetch_power_monthly_requests(lat=lat, lon=lon, start_year=start_year, end_year=end_year)
+        years = aggregate_yearly_averages(monthly)
+        return {"location": {"lat": lat, "lon": lon}, "years": years}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch yearly climate: {e}")
+
+
+@app.get("/api/fires")
+def fires_count(
+    lat_min: float = Query(...),
+    lon_min: float = Query(...),
+    lat_max: float = Query(...),
+    lon_max: float = Query(...),
+    days: int = Query(30, ge=1, le=60),
+):
+    try:
+        result = count_firms_recent_fires(lon_min=lon_min, lat_min=lat_min, lon_max=lon_max, lat_max=lat_max, days=days)
+        return {"bbox": {"lat_min": lat_min, "lon_min": lon_min, "lat_max": lat_max, "lon_max": lon_max}, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch fires: {e}")
