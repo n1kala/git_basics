@@ -15,6 +15,10 @@ import StabilityCard from '../components/StabilityCard'
 interface ClimateYearlyResponse {
   location: { lat: number; lon: number }
   years: { year: number; average_temperature_c: number | null; average_precip_mm: number | null; average_humidity_percent: number | null }[]
+  projections?: {
+    temperature_c?: { year: number; value: number }[]
+    precip_mm?: { year: number; value: number }[]
+  }
 }
 
 interface FiresResponse {
@@ -33,6 +37,7 @@ export default function Dashboard() {
   const [yearly, setYearly] = useState<ClimateYearlyResponse | null>(null)
   const [stability, setStability] = useState<number | null>(null)
   const [fires, setFires] = useState<FiresResponse | null>(null)
+  const [projectionText, setProjectionText] = useState<string | null>(null)
   const q = params.get('q')
   const lat = params.get('lat')
   const lon = params.get('lon')
@@ -69,6 +74,22 @@ export default function Dashboard() {
         const payload = { years: yr.years }
         const stabilityScore = computeStabilityScore(payload)
         setStability(stabilityScore)
+
+        // Projection text for rainfall percentage change by 2035
+        try {
+          const lastActual = yr.years[yr.years.length - 1]?.year
+          const proj = yr.projections?.precip_mm ?? []
+          const pTarget = proj.find(p => p.year === 2035)
+          const base = yr.years.find(y => y.year === lastActual)?.average_precip_mm ?? null
+          if (pTarget && typeof base === 'number' && base > 0) {
+            const deltaPct = Math.round(((pTarget.value - base) / base) * 100)
+            const dir = deltaPct < 0 ? 'drop' : 'increase'
+            const risk = deltaPct < 0 ? '— drought risk increasing.' : '— flood risk possible.'
+            setProjectionText(`Predicted rainfall ${dir} of ${Math.abs(deltaPct)}% by 2035 ${risk}`)
+          } else {
+            setProjectionText(null)
+          }
+        } catch { setProjectionText(null) }
 
         // Fires in 2-degree bbox around location for last 30 days
         const latMin = latitude - 1
@@ -120,16 +141,25 @@ export default function Dashboard() {
             <StabilityCard score={stability} />
           </div>
 
+          {projectionText && (
+            <div className="p-4 rounded-md border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+              <div className="text-sm text-gray-500 mb-1">Projection</div>
+              <div className="text-sm">{projectionText}</div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <ChartCard title="Temperature (°C)">
               <YearlyChart
                 data={yearly.years.map(y => ({ date: String(y.year), value: y.average_temperature_c }))}
+                proj={yearly.projections?.temperature_c?.map(p => ({ date: String(p.year), value: p.value })) ?? []}
                 color="#ef4444"
               />
             </ChartCard>
             <ChartCard title="Precipitation (mm)">
               <YearlyChart
                 data={yearly.years.map(y => ({ date: String(y.year), value: y.average_precip_mm }))}
+                proj={yearly.projections?.precip_mm?.map(p => ({ date: String(p.year), value: p.value })) ?? []}
                 color="#0ea5e9"
               />
             </ChartCard>
@@ -165,8 +195,9 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
-function YearlyChart({ data, color }: { data: { date: string; value: number | null }[]; color: string }) {
+function YearlyChart({ data, proj = [], color }: { data: { date: string; value: number | null }[]; proj?: { date: string; value: number }[]; color: string }) {
   const filtered = useMemo(() => data.filter((d) => typeof d.value === 'number'), [data])
+  const projFiltered = useMemo(() => proj.filter((d) => typeof d.value === 'number'), [proj])
   return (
     <div className="w-full h-64">
       <ResponsiveContainer width="100%" height="100%">
@@ -177,6 +208,9 @@ function YearlyChart({ data, color }: { data: { date: string; value: number | nu
           <Tooltip />
           <Legend />
           <Line type="monotone" dataKey="value" stroke={color} dot={false} strokeWidth={2} />
+          {projFiltered.length > 0 && (
+            <Line type="monotone" data={projFiltered} dataKey="value" stroke={color} strokeDasharray="5 5" dot={false} strokeWidth={2} />
+          )}
         </LineChart>
       </ResponsiveContainer>
     </div>

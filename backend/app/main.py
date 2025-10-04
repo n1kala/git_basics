@@ -13,6 +13,7 @@ from .services import (
     fetch_power_monthly_requests,
     aggregate_yearly_averages,
     count_firms_recent_fires,
+    project_trend_to,
 )
 
 app = FastAPI(title="EcoShield API", version="1.0.0")
@@ -88,7 +89,17 @@ def climate_yearly(
     try:
         monthly = fetch_power_monthly_requests(lat=lat, lon=lon, start_year=start_year, end_year=end_year)
         years = aggregate_yearly_averages(monthly)
-        return {"location": {"lat": lat, "lon": lon}, "years": years}
+        target = max(end_year, 2035)
+        proj_temp = project_trend_to(years, key="average_temperature_c", target_year=target)
+        proj_precip = project_trend_to(years, key="average_precip_mm", target_year=target)
+        return {
+            "location": {"lat": lat, "lon": lon},
+            "years": years,
+            "projections": {
+                "temperature_c": proj_temp,
+                "precip_mm": proj_precip,
+            },
+        }
     except HTTPException:
         raise
     except Exception as e:

@@ -410,3 +410,48 @@ def _linear_regression_slope(points: List[Tuple[float, float]]) -> float:
         return 0.0
     ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in points)
     return ss_xy / ss_xx
+
+
+def _linear_regression(points: List[Tuple[float, float]]) -> Tuple[float, float]:
+    """Return (slope, intercept) for y ~ a + b*x. If <2 points or no variance, returns (0, mean_y)."""
+    n = len(points)
+    if n < 2:
+        mean_y = sum((y for _, y in points), 0.0) / n if n else 0.0
+        return 0.0, mean_y
+    sum_x = sum(p[0] for p in points)
+    sum_y = sum(p[1] for p in points)
+    mean_x = sum_x / n
+    mean_y = sum_y / n
+    ss_xx = sum((x - mean_x) ** 2 for x, _ in points)
+    if ss_xx == 0:
+        return 0.0, mean_y
+    ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    slope = ss_xy / ss_xx
+    intercept = mean_y - slope * mean_x
+    return slope, intercept
+
+
+def project_trend_to(years: List[Dict], key: str, target_year: int) -> List[Dict[str, float]]:
+    """Project linear trend for the given key up to target_year.
+    years: list of {'year': int, key: float | None}
+    Returns list of {'year': int, 'value': float} for years > last_actual_year up to target_year.
+    """
+    pts: List[Tuple[float, float]] = []
+    last_year = None
+    for rec in sorted(years, key=lambda r: r["year"]):
+        y = rec.get("year")
+        v = rec.get(key)
+        if isinstance(y, int):
+            last_year = y
+        if isinstance(y, int) and isinstance(v, (int, float)):
+            pts.append((float(y), float(v)))
+    if last_year is None or target_year <= last_year:
+        return []
+    slope, intercept = _linear_regression(pts)
+    out: List[Dict[str, float]] = []
+    for yr in range(last_year + 1, target_year + 1):
+        val = intercept + slope * yr
+        if key in ("average_precip_mm", "average_humidity_percent"):
+            val = max(0.0, val)
+        out.append({"year": yr, "value": float(val)})
+    return out
