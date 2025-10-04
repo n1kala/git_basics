@@ -7,6 +7,7 @@ declare module 'react-leaflet' {
     zoom?: number
     children?: ReactNode
     style?: React.CSSProperties
+    onClick?: (e: any) => void
   }
 
   export interface TileLayerProps {
