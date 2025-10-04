@@ -285,3 +285,128 @@ def _range_penalty(value: float, low: float, high: float, full_span: float) -> f
     if value < low:
         return min(1.0, (low - value) / (full_span / 2))
     return min(1.0, (value - high) / (full_span / 2))
+
+
+# --------------------
+# Climate stability scoring
+# --------------------
+
+def calculate_stability_score(data: Dict) -> int:
+    """Calculate a 0-100 climate Stability Score using simple linear regression.
+
+    Input formats supported:
+    - {'years': [{ 'year': 2006, 'average_temperature_c': 21.3, 'average_precip_mm': 76.4 }, ...]}
+    - {'series': [{ 'date': 'YYYY-MM', 'temperature_c': 21.3, 'precip_mm': 80.1 }, ...]}
+
+    Method:
+    - Take last up-to-20 years of data
+    - Compute linear regression slope per year for temperature and precipitation
+    - Convert slopes to penalties via soft thresholds
+      * Temperature thresholds: |slope| <= 0.02°C/yr (no penalty), >= 0.05°C/yr (max)
+      * Precipitation uses relative slope (fraction per year):
+        - drying (negative) penalized with thresholds: |rel| <= 0.01/yr (no penalty), >= 0.03/yr (max)
+        - wetting (positive) penalized at half strength
+    - Score = 100 * (1 - (0.6 * temp_penalty + 0.4 * precip_penalty))
+    """
+    years_records: List[Dict] = []
+
+    if isinstance(data, dict) and "years" in data and isinstance(data["years"], list):
+        years_records = [r for r in data["years"] if isinstance(r, dict) and "year" in r]
+    elif isinstance(data, dict) and "series" in data and isinstance(data["series"], list):
+        # Aggregate monthly series to yearly averages
+        by_year: Dict[int, Dict[str, float]] = {}
+        counts: Dict[int, Dict[str, int]] = {}
+        for row in data["series"]:
+            try:
+                date = str(row.get("date"))
+                y = int(date[:4])
+            except Exception:
+                continue
+            by_year.setdefault(y, {"t": 0.0, "p": 0.0})
+            counts.setdefault(y, {"t": 0, "p": 0})
+            t = row.get("temperature_c")
+            if isinstance(t, (int, float)):
+                by_year[y]["t"] += float(t)
+                counts[y]["t"] += 1
+            p = row.get("precip_mm")
+            if isinstance(p, (int, float)):
+                by_year[y]["p"] += float(p)
+                counts[y]["p"] += 1
+        for y in sorted(by_year.keys()):
+            t_avg = (by_year[y]["t"] / counts[y]["t"]) if counts[y]["t"] else None
+            p_avg = (by_year[y]["p"] / counts[y]["p"]) if counts[y]["p"] else None
+            years_records.append({
+                "year": y,
+                "average_temperature_c": t_avg,
+                "average_precip_mm": p_avg,
+            })
+    else:
+        return 0
+
+    # Keep last 20 years with any usable data
+    years_records = sorted(years_records, key=lambda r: r["year"]) [-20:]
+    if not years_records:
+        return 0
+
+    # Build regression inputs per metric
+    def build_series(key: str) -> List[Tuple[float, float]]:
+        pts: List[Tuple[float, float]] = []
+        for idx, rec in enumerate(years_records):
+            val = rec.get(key)
+            if isinstance(val, (int, float)):
+                pts.append((float(idx), float(val)))
+        return pts
+
+    temp_pts = build_series("average_temperature_c")
+    precip_pts = build_series("average_precip_mm")
+
+    temp_slope = _linear_regression_slope(temp_pts)
+    precip_slope = _linear_regression_slope(precip_pts)
+
+    # Convert precip slope to relative per-year slope using mean level
+    def mean_of(pts: List[Tuple[float, float]]) -> Optional[float]:
+        return sum(y for _, y in pts) / len(pts) if pts else None
+
+    precip_mean = mean_of(precip_pts) or 0.0
+    rel_precip_slope = (precip_slope / precip_mean) if precip_mean > 0 else 0.0
+
+    # Temperature penalty: piecewise from 0 at 0.02 to 1 at 0.05 degC/yr
+    def piecewise_penalty(x: float, lo: float, hi: float) -> float:
+        ax = abs(x)
+        if ax <= lo:
+            return 0.0
+        if ax >= hi:
+            return 1.0
+        return (ax - lo) / (hi - lo)
+
+    temp_penalty = piecewise_penalty(temp_slope, lo=0.02, hi=0.05)
+
+    # Precipitation penalty: drying heavier than wetting
+    # relative slope thresholds per year: 1% (no penalty) to 3% (max)
+    drying_pen = piecewise_penalty(min(0.0, rel_precip_slope), lo=0.01, hi=0.03)  # min(0, rel) gives negative or zero
+    # For wetting, penalize at half strength
+    wetting_pen = 0.5 * piecewise_penalty(max(0.0, rel_precip_slope), lo=0.01, hi=0.03)
+    precip_penalty = max(drying_pen, wetting_pen)
+
+    overall_penalty = 0.6 * temp_penalty + 0.4 * precip_penalty
+    score = int(round(100 * max(0.0, 1.0 - overall_penalty)))
+    return max(0, min(100, score))
+
+
+def _linear_regression_slope(points: List[Tuple[float, float]]) -> float:
+    """Return slope of simple linear regression y ~ a + b*x for given points.
+    If insufficient variance or <2 points, return 0.0.
+    """
+    n = len(points)
+    if n < 2:
+        return 0.0
+    sum_x = sum(p[0] for p in points)
+    sum_y = sum(p[1] for p in points)
+    mean_x = sum_x / n
+    mean_y = sum_y / n
+
+    ss_xx = sum((x - mean_x) ** 2 for x, _ in points)
+    if ss_xx == 0:
+        return 0.0
+    ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    return ss_xy / ss_xx
