@@ -35,6 +35,24 @@ export default function Home() {
         />
         <button type="submit" className="rounded-md bg-brand text-white px-5 py-3 hover:bg-brand-dark transition">Search</button>
       </form>
+      <div className="mt-6">
+        <div className="text-sm text-gray-500 mb-2">Try demo cities:</div>
+        <div className="flex flex-wrap gap-2">
+          {[
+            { label: 'Houston (USA)', q: 'Houston, Texas' },
+            { label: 'Tbilisi (Georgia)', q: 'Tbilisi, Georgia' },
+            { label: 'Sydney (Australia)', q: 'Sydney, Australia' },
+          ].map((c) => (
+            <button
+              key={c.label}
+              onClick={() => navigate(`/dashboard?q=${encodeURIComponent(c.q)}`)}
+              className="px-3 py-2 rounded-md border border-gray-300 dark:border-gray-700 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
